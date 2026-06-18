@@ -1,0 +1,50 @@
+[
+  {
+    "type": "open",
+    "difficulty": "easy",
+    "tags": ["通用"],
+    "question": "请做一个简短的自我介绍，重点说明与目标岗位相关的经历。"
+  },
+  {
+    "type": "project",
+    "difficulty": "medium",
+    "tags": ["vue", "前端"],
+    "question": "请介绍一个你负责的前端项目，你在其中承担了什么角色？"
+  },
+  {
+    "type": "technical",
+    "difficulty": "medium",
+    "tags": ["vue", "前端"],
+    "question": "Vue3 的 Composition API 相比 Options API 有哪些优势？"
+  },
+  {
+    "type": "technical",
+    "difficulty": "hard",
+    "tags": ["vue", "前端", "性能"],
+    "question": "前端项目中你是如何进行性能优化的？请举例说明。"
+  },
+  {
+    "type": "technical",
+    "difficulty": "medium",
+    "tags": ["java", "后端"],
+    "question": "Spring Boot 的自动配置原理是什么？"
+  },
+  {
+    "type": "technical",
+    "difficulty": "hard",
+    "tags": ["java", "后端", "mysql"],
+    "question": "MySQL 索引失效的常见场景有哪些？"
+  },
+  {
+    "type": "behavioral",
+    "difficulty": "medium",
+    "tags": ["通用"],
+    "question": "描述一次你与同事产生技术分歧的经历，你是如何处理的？"
+  },
+  {
+    "type": "project",
+    "difficulty": "medium",
+    "tags": ["测试"],
+    "question": "你设计过哪些测试用例？如何保证测试覆盖率？"
+  }
+]

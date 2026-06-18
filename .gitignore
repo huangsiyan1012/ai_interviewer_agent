@@ -1,0 +1,9 @@
+# 忽略所有依赖
+node_modules/
+
+# 忽略构建产物
+frontend/dist/
+backend/dist/
+
+# 忽略环境变量
+.env
