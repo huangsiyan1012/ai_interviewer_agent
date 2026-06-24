@@ -1,4 +1,9 @@
-/** 首轮出题 Prompt */
+/**
+ * 出题 Prompt
+ *
+ * generate_question Tool 调用时，把简历/JD/题库/RAG 等信息
+ * 全部塞进这个模板，让 LLM 生成一道合适的面试题。
+ */
 export const QUESTION_PROMPT = `你是资深技术面试官，正在对候选人进行「{jobRole}」岗位的模拟面试。
 
 ## 候选人简历摘要

@@ -1,15 +1,23 @@
+/**
+ * get_resume_context Tool — 读取候选人简历
+ *
+ * 从 MySQL 读 resumes.parsed_data（上一步简历解析 Agent 存进去的）。
+ * 不调 LLM，纯数据库查询。
+ */
 import { tool } from "langchain";
 import { z } from "zod";
 import { getResumeById } from "../../models/Resum";
 import { getAgentContext } from "./agent-context";
 
-/** 读取简历结构化摘要，供 Agent 决定出题方向 */
 export const getResumeContextTool = tool(
   async ({ resume_id }) => {
     const ctx = getAgentContext();
-    const id = resume_id || ctx.resumeId;
+    const id = resume_id || ctx.resumeId; // 省略参数时用上下文里的 resumeId
+
     const resume = await getResumeById(id);
-    if (!resume?.parsed_data) return JSON.stringify({ summary: "暂无简历信息", skills: [] });
+    if (!resume?.parsed_data) {
+      return JSON.stringify({ summary: "暂无简历信息", skills: [] });
+    }
 
     const d = resume.parsed_data;
     return JSON.stringify({

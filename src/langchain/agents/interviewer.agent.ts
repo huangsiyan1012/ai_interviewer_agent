@@ -1,8 +1,13 @@
 /**
- * 面试官 Agent — Tool-calling ReAct Agent
+ * 面试官 Agent — 整个面试对话的 AI 大脑
  *
- * 不使用 toolStrategy 结构化输出（DeepSeek 易陷入重复调用），
- * 决策 JSON 从 Agent 最终回复或 generate_question 的 observation 解析。
+ * 和简历解析 Agent 的区别：
+ *   - 简历 Agent 只有 1 个 Tool（parse_resume）
+ *   - 面试官 Agent 有 5 个 Tool，Agent 自己决定调哪些、什么顺序
+ *
+ * 两个任务：
+ *   task: "start_interview"  → 开始面试，出第一题
+ *   task: "submit_answer"    → 候选人答完后，决定追问/换题/结束
  */
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { createAgent, toolCallLimitMiddleware } from "langchain";
@@ -25,29 +30,36 @@ import {
   type AgentToolContext,
 } from "../tools/agent-context";
 
+// ── 创建面试官 Agent（应用启动时执行一次）──
 const interviewerAgent = createAgent({
   model: createDeepSeekModel(),
-  tools: interviewerTools,
+  tools: interviewerTools, // 5 个 Tool：analyze_job / get_resume_context / ...
   systemPrompt: new SystemMessage(INTERVIEWER_AGENT_PROMPT),
   middleware: [
-    // 单次运行最多 6 次 tool call，超出后强制结束，防止死循环
+    // 单次最多 6 次 Tool 调用（开始面试大约需要 4 次），防止死循环
     toolCallLimitMiddleware({ runLimit: 6, exitBehavior: "end" }),
   ],
 });
 
+/** 调用 Agent 时的入参 */
 export interface InterviewerAgentInput {
-  ctx: AgentToolContext;
+  ctx: AgentToolContext; // sessionId / resumeId / jobDescription 等
   task: "start_interview" | "submit_answer";
-  priorStepLogs?: AgentStepLog[];
+  priorStepLogs?: AgentStepLog[]; // 之前轮次的 Tool 日志（submit_answer 时追加）
   priorMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
+/** Agent 返回给 Service 的结果 */
 export interface InterviewerAgentResult {
-  decision: InterviewerDecision;
-  stepLogs: AgentStepLog[];
-  shouldEnd: boolean;
+  decision: InterviewerDecision; // 结构化决策（题目 + action）
+  stepLogs: AgentStepLog[];      // 本次 Tool 调用日志
+  shouldEnd: boolean;            // 是否该结束面试（结合轮次规则）
 }
 
+/**
+ * 根据 task 类型，拼装发给 Agent 的用户消息
+ * Agent 靠这条消息知道「现在要干什么」
+ */
 function buildUserMessage(input: InterviewerAgentInput): string {
   const { ctx, task } = input;
   const { minRounds, maxRounds } = config.interview;
@@ -63,6 +75,7 @@ function buildUserMessage(input: InterviewerAgentInput): string {
     ].join("\n");
   }
 
+  // submit_answer 任务
   return [
     "【任务】候选人已提交回答，请决定下一步。",
     `sessionId: ${ctx.sessionId}`,
@@ -75,12 +88,15 @@ function buildUserMessage(input: InterviewerAgentInput): string {
   ].join("\n");
 }
 
-/** 运行面试官 Agent Loop，返回结构化决策与 tool 执行日志 */
+/**
+ * 运行面试官 Agent — Service 层的唯一 AI 入口
+ */
 export async function runInterviewerAgent(
   input: InterviewerAgentInput,
 ): Promise<InterviewerAgentResult> {
   const userContent = buildUserMessage(input);
 
+  // 在 AsyncLocalStorage 挂上上下文，Tool 内部可通过 getAgentContext() 读取
   const result = await runWithAgentContext(input.ctx, async () => {
     return interviewerAgent.invoke(
       { messages: [new HumanMessage(userContent)] },
@@ -88,21 +104,24 @@ export async function runInterviewerAgent(
     );
   });
 
+  // 合并历史日志 + 本次日志
   const stepLogs = mergeAgentStepLogs(
     input.priorStepLogs,
     extractAgentStepLogs(result.messages ?? []),
   );
 
+  // 从 Agent 回复或 generate_question 的 observation 解析决策
   const decision = resolveInterviewerDecision(
     result.messages ?? [],
     stepLogs,
     input.task,
   );
 
+  // ── Service 层的轮次硬规则（Agent 决策之上再套一层保险）──
   const { minRounds, maxRounds } = config.interview;
   const round = input.ctx.currentRound ?? 0;
-  const reachedMax = round >= maxRounds;
-  const canLlmEnd = round >= minRounds && decision.action === "end_interview";
+  const reachedMax = round >= maxRounds; // 达到 12 轮强制结束
+  const canLlmEnd = round >= minRounds && decision.action === "end_interview"; // 至少 3 轮才能结束
   const shouldEnd = reachedMax || canLlmEnd;
 
   if (shouldEnd && decision.action !== "end_interview") {
@@ -115,7 +134,10 @@ export async function runInterviewerAgent(
   return { decision, stepLogs, shouldEnd };
 }
 
-/** 从 Agent 最终回复或 generate_question 结果解析决策 */
+/**
+ * 解析 Agent 的最终决策
+ * 优先级：Agent 文本 JSON > generate_question 的 observation > 默认兜底
+ */
 function resolveInterviewerDecision(
   messages: { content?: unknown }[],
   stepLogs: AgentStepLog[],
@@ -137,6 +159,7 @@ function resolveInterviewerDecision(
   };
 }
 
+/** 从 Agent 最后几条 AI 消息里抠 JSON */
 function parseDecisionFromMessages(
   messages: { content?: unknown }[],
 ): InterviewerDecision | null {
@@ -148,12 +171,13 @@ function parseDecisionFromMessages(
       if (!match) continue;
       return InterviewerDecisionSchema.parse(JSON.parse(match[0]));
     } catch {
-      /* try earlier message */
+      /* 继续找上一条 */
     }
   }
   return null;
 }
 
+/** 兜底：从 generate_question Tool 的返回里取题目 */
 function parseDecisionFromGenerateQuestion(
   logs: AgentStepLog[],
   task: "start_interview" | "submit_answer",

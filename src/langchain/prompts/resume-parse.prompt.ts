@@ -1,4 +1,9 @@
-/** 简历解析 Prompt 模板 */
+/**
+ * 简历解析 Prompt 模板
+ *
+ * Prompt = 发给 LLM 的「说明书」，告诉它要做什么、输出什么格式。
+ * {resumeText} 是占位符，buildResumeParsePrompt 会替换成真实简历内容。
+ */
 export const RESUME_PARSE_PROMPT = `你是简历解析助手。请从下面的简历文本中提取信息，只返回 JSON，不要其他说明。
 
 JSON 格式：
@@ -14,8 +19,8 @@ JSON 格式：
 {resumeText}
 ---`;
 
+/** 把模板里的 {resumeText} 替换成真实简历，并截断到 5000 字防止超 token */
 export function buildResumeParsePrompt(resumeText: string): string {
-  // 控制长度，避免超出 token 限制
   const trimmed = resumeText.slice(0, 5000);
   return RESUME_PARSE_PROMPT.replace("{resumeText}", trimmed);
 }

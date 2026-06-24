@@ -1,3 +1,14 @@
+/**
+ * generate_question Tool — 生成面试题（最核心的 Tool）
+ *
+ * 把前面几个 Tool 收集的信息（简历、岗位、题库）拼成 Prompt，
+ * 调 LLM 生成一道面试题。
+ *
+ * purpose 参数决定出题风格：
+ *   first     → 第一题，通常是自我介绍/破冰
+ *   follow_up → 针对上一轮回答追问
+ *   next      → 切换到新话题
+ */
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { tool } from "langchain";
 import { z } from "zod";
@@ -7,7 +18,6 @@ import { buildQuestionPrompt } from "../prompts/question.prompt";
 import { retrieveKnowledge } from "../rag/retriever";
 import { getAgentContext } from "./agent-context";
 
-/** 基于已收集的上下文生成一道面试题 */
 export const generateQuestionTool = tool(
   async ({
     job_role,
@@ -20,6 +30,8 @@ export const generateQuestionTool = tool(
     const ctx = getAgentContext();
     const role = job_role || ctx.jobRole || "技术岗位";
     const skills = resume_skills ?? [];
+
+    // 可选：从 Markdown 知识库检索（RAG_ENABLED=true 时生效）
     const ragQuery = `${skills.join(" ")} ${role}`;
     const knowledgeHints =
       retrieveKnowledge(ragQuery, role) || "（无额外知识库参考）";
@@ -34,6 +46,7 @@ export const generateQuestionTool = tool(
       knowledgeHints,
     });
 
+    // 根据 purpose 给 LLM 额外指令
     const systemExtra =
       purpose === "first"
         ? "这是面试的第一个问题，通常是自我介绍或破冰。"
@@ -54,6 +67,7 @@ export const generateQuestionTool = tool(
         : JSON.stringify(response.content);
 
     const question = parseQuestionJson(content);
+    // 返回的题目会被 interviewer.agent 解析成 decision.question
     return JSON.stringify(question);
   },
   {

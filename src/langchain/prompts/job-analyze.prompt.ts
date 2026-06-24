@@ -1,4 +1,8 @@
-/** 岗位分析 Prompt */
+/**
+ * 岗位分析 Prompt
+ *
+ * 用户填的岗位描述可能很随意，LLM 负责标准化成结构化 JSON。
+ */
 export const JOB_ANALYZE_PROMPT = `你是招聘分析助手。用户会描述一个目标岗位（可能是岗位名称、JD 片段或自己的理解），请分析并返回 JSON，不要其他说明。
 
 JSON 格式：
