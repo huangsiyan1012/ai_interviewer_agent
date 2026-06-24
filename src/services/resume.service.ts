@@ -1,25 +1,21 @@
 /**
  * 简历 Service
  *
- * 职责：接收文件/文字 → 调 Workflow 解析 → 写入 DB
- * 调用链：Controller → ResumeService → ResumeParseWorkflow → parseResumeChain
+ * AI 路径：ResumeService → Resume Parse Agent → parse_resume Tool
  */
 import fs from "fs";
 import path from "path";
 import config from "../config/config";
 import { createCandidate } from "../models/Candidate";
 import { createResume, getResumeById } from "../models/Resum";
-import { parseResumeChain } from "../langchain/chains/resume-parse.chain";
-import { resumeParseWorkflow } from "../workflows/resume-parse.workflow";
+import { runResumeParseAgent } from "../langchain/agents/resume-parse.agent";
+import { extractResumeText } from "../utils/file-parser";
 import { generateId } from "../utils/uuid";
 
 export class ResumeService {
-  /** 文件上传：Workflow 负责「提取文本 + LLM 解析」 */
   async uploadResume(file: Express.Multer.File, userId: string) {
-    const parsedData = await resumeParseWorkflow.execute({
-      filePath: file.path,
-      fileName: file.originalname,
-    });
+    const text = await extractResumeText(file.path, file.originalname);
+    const parsedData = await runResumeParseAgent(text, generateId());
 
     return this.saveResume(
       file.path,
@@ -30,12 +26,11 @@ export class ResumeService {
     );
   }
 
-  /** 文字粘贴：跳过文件提取，直接调 Chain */
   async uploadResumeFromText(content: string, userId: string) {
     const text = content.trim();
     if (!text) throw new Error("简历内容不能为空");
 
-    const parsedData = await parseResumeChain(text);
+    const parsedData = await runResumeParseAgent(text, generateId());
 
     const fileName = `paste-${Date.now()}.txt`;
     const filePath = path.join(config.upload.dir, fileName);
@@ -44,12 +39,11 @@ export class ResumeService {
     return this.saveResume(filePath, fileName, "text/plain", parsedData, userId);
   }
 
-  /** 把解析结果关联到当前登录用户，写入 DB */
   private async saveResume(
     filePath: string,
     fileName: string,
     mimeType: string,
-    parsedData: Awaited<ReturnType<typeof parseResumeChain>>,
+    parsedData: Awaited<ReturnType<typeof runResumeParseAgent>>,
     userId: string,
   ) {
     const candidateId = generateId();

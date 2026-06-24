@@ -1,13 +1,8 @@
 /**
  * 面试 Service — 业务编排中心
  *
- * 职责：
- * 1. 权限校验（用户是否拥有该简历/会话）
- * 2. 读写数据库（session、QA 记录、graph_state）
- * 3. 调用 Workflow / Chain 完成 AI 逻辑
- * 4. 把 AI 结果落库并返回给 Controller
- *
- * 调用链：Controller → Service → Workflow → Agent → Chain → LLM
+ * AI 路径：Service → Agent Executor → LLM → Tools → Observation → Loop
+ * Service 只负责权限、DB、状态持久化，不直接调用 Chain / Workflow。
  */
 import {
   createRecord,
@@ -21,19 +16,15 @@ import {
 } from "../models/InterviewSession";
 import { getResumeById } from "../models/Resum";
 import { getCandidateById } from "../models/Candidate";
-import { analyzeJobChain } from "../langchain/chains/job-analyze.chain";
 import config from "../config/config";
 import { SessionMemoryManager } from "../langchain/memory/session.memory";
-import { formatJobKnowledge } from "../types/job";
 import type { SessionGraphState } from "../types/api";
-import { followUpWorkflow } from "../workflows/follow-up.workflow";
-import { questionGenerateWorkflow } from "../workflows/question-generate.workflow";
-import { sessionInitWorkflow } from "../workflows/session-init.workflow";
+import type { AgentStepLog } from "../langchain/agents/schemas";
+import { runInterviewerAgent } from "../langchain/agents/interviewer.agent";
 import { generateId } from "../utils/uuid";
 
 const { minRounds, maxRounds } = config.interview;
 
-/** 服务重启或页面刷新时，从 DB 恢复内存中的对话缓存 */
 function restoreMemory(
   sessionId: string,
   messages: SessionGraphState["messages"],
@@ -46,20 +37,33 @@ function restoreMemory(
   }
 }
 
+/** 从 Agent tool 日志中提取岗位解析结果 */
+function extractJobFromLogs(logs: AgentStepLog[]): {
+  jobRole: string;
+  jobKnowledge: string;
+} {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const log = logs[i];
+    if (log.action !== "observation" || log.tool !== "analyze_job") continue;
+    if (!log.output) continue;
+    try {
+      const data = JSON.parse(log.output);
+      return {
+        jobRole: String(data.title ?? "未知岗位"),
+        jobKnowledge: String(data.jobKnowledge ?? ""),
+      };
+    } catch {
+      /* try earlier log */
+    }
+  }
+  return { jobRole: "未知岗位", jobKnowledge: "" };
+}
+
 export class InterviewService {
   /**
-   * 【流程 1】开始面试
-   *
-   * Service 层步骤：
-   *   权限校验 → LLM 解析岗位 → 建 session → 调 2 个 Workflow → 写 graph_state
-   *
-   * AI 调用：
-   *   analyzeJobChain（岗位分析，直接调 Chain，不经过 Workflow）
-   *   sessionInitWorkflow（初始化 Memory）
-   *   questionGenerateWorkflow（首轮出题）
+   * 开始面试 — 由 Interviewer Agent 自主调用 tools 完成首题
    */
   async startInterview(resumeId: string, jobDescription: string, userId: string) {
-    // ── 1. 业务校验 ──
     const resume = await getResumeById(resumeId);
     if (!resume) throw new Error("简历不存在");
 
@@ -71,39 +75,38 @@ export class InterviewService {
     const trimmedJob = jobDescription.trim();
     if (!trimmedJob) throw new Error("请填写目标岗位");
 
-    // ── 2. AI：解析用户填写的岗位（Chain，非 Workflow）──
-    const parsedJob = await analyzeJobChain(trimmedJob);
-    const jobRole = parsedJob.title;
-    const jobKnowledge = formatJobKnowledge(parsedJob);
-
-    // ── 3. 创建面试会话（DB）──
     const sessionId = generateId();
+
+    const { decision, stepLogs } = await runInterviewerAgent({
+      ctx: {
+        sessionId,
+        resumeId,
+        jobDescription: trimmedJob,
+      },
+      task: "start_interview",
+    });
+
+    const { jobRole, jobKnowledge } = extractJobFromLogs(stepLogs);
+
     await createSession(
       sessionId,
       resume.candidate_id,
       resumeId,
       jobRole,
-      maxRounds, // 安全上限，实际轮次由 LLM 动态决定
+      maxRounds,
     );
 
-    // ── 4. Workflow：初始化 Memory ──
-    await sessionInitWorkflow.execute({ sessionId, resumeId, jobRole });
+    SessionMemoryManager.init(sessionId);
+    const firstQuestion = decision.question;
+    SessionMemoryManager.addAI(sessionId, firstQuestion);
 
-    // ── 5. Workflow：收集上下文 + 生成第一题 ──
-    const question = await questionGenerateWorkflow.execute({
-      sessionId,
-      resumeId,
-      jobRole,
-      jobKnowledge,
-    });
-
-    // ── 6. 持久化会话快照（graph_state 供前端刷新恢复）──
-    const firstQuestion = question.content;
     const graphState: SessionGraphState = {
       jobDescription: trimmedJob,
-      jobKnowledge, // 追问时直接读，避免重复调 LLM
+      jobKnowledge,
       currentQuestion: firstQuestion,
       messages: [{ role: "assistant", content: firstQuestion }],
+      agentMemory: [{ role: "assistant", content: firstQuestion }],
+      toolExecutionHistory: stepLogs,
     };
 
     await updateSessionStatus(sessionId, "in_progress", 0);
@@ -112,7 +115,6 @@ export class InterviewService {
     return { sessionId, jobRole, jobKnowledge, firstQuestion };
   }
 
-  /** 【流程 2】获取会话（页面刷新时恢复对话） */
   async getSession(sessionId: string, userId: string) {
     const session = await getSessionById(sessionId);
     if (!session) throw new Error("面试会话不存在");
@@ -132,17 +134,12 @@ export class InterviewService {
       messages: graphState.messages ?? [],
       currentQuestion: graphState.currentQuestion,
       interviewEnded: graphState.interviewEnded ?? false,
+      toolExecutionHistory: graphState.toolExecutionHistory ?? [],
     };
   }
 
   /**
-   * 【流程 3】提交回答 — 最核心的循环
-   *
-   * Service 层步骤：
-   *   读 session → 存 QA 记录 → 调 FollowUpWorkflow → 更新 graph_state
-   *
-   * AI 调用：
-   *   followUpWorkflow → invokeInterviewerAgent → followUpChain
+   * 提交回答 — Interviewer Agent 自主决定追问 / 换题 / 结束
    */
   async submitAnswer(sessionId: string, content: string, userId: string) {
     const session = await getSessionById(sessionId);
@@ -160,9 +157,7 @@ export class InterviewService {
     const currentQuestion =
       graphState.currentQuestion ?? "请继续回答上一个问题。";
     const nextRound = session.current_round + 1;
-    const resume = await getResumeById(session.resume_id);
 
-    // ── 1. 持久化本轮 Q&A 到 interview_records 表 ──
     await createRecord(
       generateId(),
       sessionId,
@@ -173,61 +168,59 @@ export class InterviewService {
       null,
     );
 
+    SessionMemoryManager.addUser(sessionId, content);
+
+    const { decision, stepLogs, shouldEnd } = await runInterviewerAgent({
+      ctx: {
+        sessionId,
+        resumeId: session.resume_id,
+        jobRole: session.job_role,
+        jobDescription: graphState.jobDescription,
+        jobKnowledge: graphState.jobKnowledge,
+        currentRound: nextRound,
+        minRounds,
+        maxRounds: session.max_rounds,
+        lastQuestion: currentQuestion,
+        lastAnswer: content,
+      },
+      task: "submit_answer",
+      priorStepLogs: graphState.toolExecutionHistory,
+    });
+
     const messages = [
       ...(graphState.messages ?? []),
       { role: "user" as const, content },
     ];
 
-    // ── 2. 调 Workflow：Agent 决策下一题或结束 ──
-    const { agentResponse, shouldEnd } = await followUpWorkflow.execute({
-      ctx: {
-        sessionId,
-        resumeId: session.resume_id,
-        jobId: "",
-        jobRole: session.job_role,
-        resumeSummary: resume?.parsed_data?.summary ?? "",
-        resumeSkills: resume?.parsed_data?.skills ?? [],
-        jobKnowledge: graphState.jobKnowledge ?? "", // 从 graph_state 读，不重复解析
-        questionBankHints: "",
-        historyText: SessionMemoryManager.toText(sessionId),
-        currentRound: nextRound,
-        minRounds,
-        maxRounds: session.max_rounds,
-        lastAnswer: content,
-        lastQuestion: currentQuestion,
-      },
-    });
-
-    // ── 3. 根据 Workflow 返回的 shouldEnd 决定前端行为 ──
     let action: "follow_up" | "next_question" | "end_interview" = "follow_up";
     let nextQuestion: string | undefined;
 
     if (shouldEnd) {
       action = "end_interview";
     } else {
-      nextQuestion = agentResponse.question;
+      nextQuestion = decision.question;
       messages.push({ role: "assistant", content: nextQuestion });
+      SessionMemoryManager.addAI(sessionId, nextQuestion);
       action =
-        agentResponse.action === "follow_up" ? "follow_up" : "next_question";
+        decision.action === "follow_up" ? "follow_up" : "next_question";
     }
 
-    // ── 4. 更新 DB 状态 ──
     await updateSessionStatus(sessionId, "in_progress", nextRound);
     await updateSessionGraphState(sessionId, {
       ...graphState,
       currentQuestion: nextQuestion,
       messages,
+      agentMemory: messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+      toolExecutionHistory: stepLogs,
       interviewEnded: shouldEnd,
     });
 
     return { action, question: nextQuestion, round: nextRound, messages };
   }
 
-  /**
-   * 【流程 4】结束面试 → 生成报告
-   *
-   * AI 调用：reportService → evaluationWorkflow → invokeEvaluatorAgent
-   */
   async finishInterview(sessionId: string, userId: string) {
     const session = await getSessionById(sessionId);
     if (!session) throw new Error("面试会话不存在");

@@ -1,8 +1,7 @@
 /**
  * 报告 Service
  *
- * 职责：权限校验 → 调 EvaluationWorkflow 生成报告 → 存 DB
- * 调用链：InterviewService.finishInterview → ReportService → EvaluationWorkflow → EvaluatorAgent
+ * AI 路径：ReportService → Evaluator Agent Executor → Tools → 结构化报告
  */
 import {
   createReport,
@@ -11,9 +10,11 @@ import {
   getReportOwnedByUser,
   getReportsByUserId,
 } from "../models/FinalReport";
-import { getSessionById } from "../models/InterviewSession";
+import { getSessionById, updateSessionGraphState } from "../models/InterviewSession";
 import { getCandidateById } from "../models/Candidate";
-import { evaluationWorkflow } from "../workflows/evaluation.workflow";
+import { runEvaluatorAgent } from "../langchain/agents/evaluator.agent";
+import { SessionMemoryManager } from "../langchain/memory/session.memory";
+import type { SessionGraphState } from "../types/api";
 import { generateId } from "../utils/uuid";
 
 export class ReportService {
@@ -26,15 +27,21 @@ export class ReportService {
       throw new Error("无权访问该会话");
     }
 
-    // 幂等：同一会话不重复生成
     const existing = await getReportBySessionId(sessionId);
     if (existing) return existing;
 
-    // ── AI：EvaluationWorkflow → EvaluatorAgent → evaluationChain ──
-    const reportData = await evaluationWorkflow.execute({
-      sessionId,
-      jobRole: session.job_role,
+    const graphState = (session.graph_state ?? {}) as SessionGraphState;
+
+    const { report, stepLogs } = await runEvaluatorAgent({
+      ctx: {
+        sessionId,
+        resumeId: session.resume_id,
+        jobRole: session.job_role,
+        jobKnowledge: graphState.jobKnowledge,
+      },
     });
+
+    SessionMemoryManager.clear(sessionId);
 
     const reportId = generateId();
     await createReport(
@@ -42,13 +49,21 @@ export class ReportService {
       sessionId,
       session.candidate_id,
       session.job_role,
-      reportData.overallScore,
-      reportData,
+      report.overallScore,
+      report,
     );
 
-    const report = await getReportById(reportId);
-    if (!report) throw new Error("报告生成失败");
-    return report;
+    await updateSessionGraphState(sessionId, {
+      ...graphState,
+      toolExecutionHistory: [
+        ...(graphState.toolExecutionHistory ?? []),
+        ...stepLogs,
+      ],
+    });
+
+    const saved = await getReportById(reportId);
+    if (!saved) throw new Error("报告生成失败");
+    return saved;
   }
 
   async getReport(id: string, userId: string) {

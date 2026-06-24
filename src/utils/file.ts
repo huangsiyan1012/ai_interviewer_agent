@@ -1,7 +1,7 @@
 // backend/src/utils/file.ts
 import fs from "fs";
 import path from "path";
-import config from "../config/config";
+import config from "../config/config.js";
 
 // 确保上传目录存在
 export const ensureUploadDir = (): void => {

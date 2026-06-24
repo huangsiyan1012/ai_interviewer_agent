@@ -37,6 +37,11 @@ const config = {
     enabled: process.env.RAG_ENABLED === "true",
   },
 
+  // Agent Executor 图递归上限（每轮 model + tool 各计一步）
+  agent: {
+    recursionLimit: Number(process.env.AGENT_RECURSION_LIMIT) || 40,
+  },
+
   // 面试轮次：LLM 动态决定结束时机，min/max 为安全边界
   interview: {
     minRounds: Number(process.env.INTERVIEW_MIN_ROUNDS) || 3,
